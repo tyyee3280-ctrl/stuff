@@ -1114,7 +1114,7 @@
         </div>
       </div>
 
-      <iframe id="playerFrame" allowfullscreen allow="autoplay; encrypted-media; picture-in-picture; fullscreen" referrerpolicy="no-referrer"></iframe>
+      <iframe id="playerFrame" allowfullscreen allow="autoplay; encrypted-media; picture-in-picture; fullscreen; clipboard-write" referrerpolicy="origin"></iframe>
 
       <!-- Custom shell chrome over iframe — pointer-events only on chrome pieces -->
       <div class="shell-overlay chrome-hidden" id="shellOverlay">
@@ -1256,13 +1256,15 @@
     const TMDB_KEY = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI1ODc0MDQ5MzBmMjNlOGRiNzY2ZWUyYmFiNWJhN2NiNSIsIm5iZiI6MTc2MjA0MzU4MS42NTUsInN1YiI6IjY5MDZhNmJkNjM2MjExYTYwNzRjODMwZCIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.ZvKx6IUWYOMCeEfS9WWOuYVSO8vc-5mNEZ4o-haUi0A";
     const TMDB = "https://api.themoviedb.org/3";
     const IMG = "https://image.tmdb.org/t/p";
+    const IMG_FALLBACK = "https://www.themoviedb.org/t/p";
 
+    // Live embed hosts only
     const SERVERS = [
       { id: "vidsrc", label: "VidSrc", emoji: "⚡", movie: (id) => `https://vidsrc.sh/embed/movie/${id}`, tv: (id,s,e) => `https://vidsrc.sh/embed/tv/${id}/${s}/${e}` },
       { id: "vidsrc2", label: "VidSrc 2", emoji: "🔷", movie: (id) => `https://vidsrc2.ru/embed/movie/${id}`, tv: (id,s,e) => `https://vidsrc2.ru/embed/tv/${id}/${s}/${e}` },
-      { id: "embedapi", label: "Embed API", emoji: "📡", movie: (id) => `https://vidsrcapi.com/embed/movie/${id}`, tv: (id,s,e) => `https://vidsrcapi.com/embed/tv/${id}/${s}/${e}` },
-      { id: "multi", label: "Multi", emoji: "🌐", movie: (id) => `https://multiembed.mov/?video_id=${id}&tmdb=1`, tv: (id,s,e) => `https://multiembed.mov/?video_id=${id}&tmdb=1&s=${s}&e=${e}` },
       { id: "2embed", label: "2Embed", emoji: "🎬", movie: (id) => `https://www.2embed.cc/embed/${id}`, tv: (id,s,e) => `https://www.2embed.cc/embedtv/${id}&s=${s}&e=${e}` },
+      { id: "vidlink", label: "VidLink", emoji: "🔗", movie: (id) => `https://vidlink.pro/movie/${id}`, tv: (id,s,e) => `https://vidlink.pro/tv/${id}/${s}/${e}` },
+      { id: "vidsrcir", label: "VidSrc IR", emoji: "🟣", movie: (id) => `https://vidsrc.ir/embed/movie/${id}`, tv: (id,s,e) => `https://vidsrc.ir/embed/tv/${id}/${s}/${e}` },
     ];
 
     const STORAGE_KEY = "zeke_continue_v1";
@@ -1406,14 +1408,52 @@
     async function tmdb(path, params = {}) {
       const url = new URL(TMDB + path);
       Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${TMDB_KEY}`, "Content-Type": "application/json" },
-      });
+      // Prefer Bearer; fall back to api_key query if network strips Authorization
+      let res;
+      try {
+        res = await fetch(url.toString(), {
+          headers: {
+            Authorization: `Bearer ${TMDB_KEY}`,
+            Accept: "application/json",
+          },
+        });
+      } catch (e) {
+        throw new Error("Network blocked TMDB — open via http://localhost not file://");
+      }
+      if (!res.ok) {
+        // retry with v3 api_key extracted from JWT payload (aud claim is the key)
+        try {
+          const payload = JSON.parse(atob(TMDB_KEY.split(".")[1]));
+          const key = payload.aud;
+          if (key) {
+            url.searchParams.set("api_key", key);
+            res = await fetch(url.toString(), { headers: { Accept: "application/json" } });
+          }
+        } catch (_) {}
+      }
       if (!res.ok) throw new Error(`TMDB ${res.status}`);
       return res.json();
     }
-    function poster(path, size = "w342") { return path ? `${IMG}/${size}${path}` : ""; }
-    function backdrop(path, size = "w1280") { return path ? `${IMG}/${size}${path}` : ""; }
+    function poster(path, size = "w342") {
+      if (!path) return "";
+      return `${IMG}/${size}${path}`;
+    }
+    function backdrop(path, size = "w1280") {
+      if (!path) return "";
+      return `${IMG}/${size}${path}`;
+    }
+    // Image error → try alternate TMDB image host once
+    document.addEventListener("error", (e) => {
+      const img = e.target;
+      if (!img || img.tagName !== "IMG" || !img.src || img.dataset.fb) return;
+      if (!img.src.includes("tmdb.org") && !img.src.includes("themoviedb.org")) return;
+      img.dataset.fb = "1";
+      if (img.src.includes("image.tmdb.org")) {
+        img.src = img.src.replace("https://image.tmdb.org/t/p", IMG_FALLBACK);
+      } else {
+        img.src = img.src.replace("https://www.themoviedb.org/t/p", "https://image.tmdb.org/t/p");
+      }
+    }, true);
     function year(date) { return date ? String(date).slice(0, 4) : "—"; }
     function toast(msg) {
       const el = document.getElementById("toast");
@@ -2193,13 +2233,23 @@
 
     // boot
     loadPrefs();
+    // clamp server index if prefs pointed at removed hosts
+    if (state.serverIndex >= SERVERS.length) state.serverIndex = 0;
     loadContinue();
     renderContinue();
-    // sync toggles from prefs
     document.getElementById("autoBadge").classList.toggle("on", state.autoServer);
     document.getElementById("autoToggle").classList.toggle("on", state.autoServer);
     document.getElementById("adToggle").classList.toggle("on", state.adShield);
-    loadHome();
+
+    if (location.protocol === "file:") {
+      toast("Open via local server — file:// blocks TMDB & embeds");
+      console.warn("Zeke: use python3 -m http.server 8765 in the zeke-peak folder, then http://127.0.0.1:8765/");
+    }
+
+    loadHome().catch((e) => {
+      console.error(e);
+      toast("Catalog failed — check network / open via http://127.0.0.1");
+    });
   </script>
 </body>
 </html>
